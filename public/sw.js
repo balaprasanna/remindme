@@ -1,4 +1,4 @@
-const CACHE_NAME = 'remindme-v1';
+const CACHE_NAME = 'remindme-v3';
 const ASSETS = ['/', '/index.html', '/manifest.json'];
 
 // Install - cache assets
@@ -29,12 +29,24 @@ self.addEventListener('fetch', (event) => {
 // Handle notification clicks
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  
+  if (event.action === 'dismiss') return;
+
   event.waitUntil(
-    clients.matchAll({ type: 'window' }).then((clientList) => {
-      if (clientList.length > 0) {
-        return clientList[0].focus();
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      // Focus existing window if available
+      for (const client of clientList) {
+        if (client.url.includes(self.location.origin) && 'focus' in client) {
+          return client.focus();
+        }
       }
+      // Otherwise open new window
       return clients.openWindow('/');
     })
   );
+});
+
+// Handle notification close
+self.addEventListener('notificationclose', (event) => {
+  // Analytics or cleanup if needed
 });

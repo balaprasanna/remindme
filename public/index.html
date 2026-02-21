@@ -720,12 +720,18 @@
     function startTimer(reminder) {
       const msInterval = reminder.frequencyMinutes * 60 * 1000;
 
-      // Calculate next fire time
-      let lastFired = parseInt(localStorage.getItem(`lastFired_${reminder.id}`) || '0');
-      if (!lastFired) lastFired = Date.now();
+      // Load persisted nextFire time
+      let nextFire = parseInt(localStorage.getItem(`nextFire_${reminder.id}`) || '0');
 
-      let nextFire = lastFired + msInterval;
-      if (nextFire <= Date.now()) nextFire = Date.now() + msInterval;
+      // If no stored time, or it's in the past, schedule from now
+      if (!nextFire || nextFire <= Date.now()) {
+        // If it was in the past, fire any missed notifications
+        if (nextFire && nextFire <= Date.now()) {
+          fireNotification(reminder);
+        }
+        nextFire = Date.now() + msInterval;
+        localStorage.setItem(`nextFire_${reminder.id}`, nextFire.toString());
+      }
 
       timers[reminder.id] = {
         nextFire,
@@ -745,8 +751,8 @@
         const reminder = reminders.find(r => r.id === id);
         if (reminder && reminder.enabled) {
           fireNotification(reminder);
-          localStorage.setItem(`lastFired_${id}`, now.toString());
           timer.nextFire = now + (reminder.frequencyMinutes * 60 * 1000);
+          localStorage.setItem(`nextFire_${id}`, timer.nextFire.toString());
         }
       }
       updateCountdown(id);
@@ -764,26 +770,38 @@
     }
 
     // --- Notifications ---
-    function fireNotification(reminder) {
+    async function fireNotification(reminder) {
       sentToday++;
       localStorage.setItem('sentToday', sentToday.toString());
       updateStats();
 
-      // Try native notification
+      // Use Service Worker for notifications (required on Android)
       if ('Notification' in window && Notification.permission === 'granted') {
-        const notif = new Notification('⏰ RemindMe', {
-          body: reminder.task,
-          icon: '/icon-192.png',
-          badge: '/icon-192.png',
-          tag: reminder.id,
-          renotify: true,
-          vibrate: [200, 100, 200]
-        });
-
-        notif.onclick = () => {
-          window.focus();
-          notif.close();
-        };
+        try {
+          const reg = await navigator.serviceWorker.ready;
+          await reg.showNotification('⏰ RemindMe', {
+            body: reminder.task,
+            icon: '/icon-192.png',
+            badge: '/icon-192.png',
+            tag: reminder.id,
+            renotify: true,
+            vibrate: [200, 100, 200],
+            requireInteraction: true,
+            actions: [{ action: 'dismiss', title: 'Dismiss' }]
+          });
+        } catch (e) {
+          // Fallback for desktop browsers
+          try {
+            const notif = new Notification('⏰ RemindMe', {
+              body: reminder.task,
+              icon: '/icon-192.png',
+              tag: reminder.id,
+            });
+            notif.onclick = () => { window.focus(); notif.close(); };
+          } catch (e2) {
+            console.log('Notification failed', e2);
+          }
+        }
       }
 
       // Also show in-app toast
@@ -876,13 +894,16 @@
         reminders[idx] = { ...reminders[idx], task, frequencyMinutes };
         showToast('✏️ Reminder updated');
       } else {
+        const newId = Date.now().toString();
         reminders.push({
-          id: Date.now().toString(),
+          id: newId,
           task,
           frequencyMinutes,
           enabled: true,
           createdAt: new Date().toISOString()
         });
+        // Set initial next fire time
+        localStorage.setItem(`nextFire_${newId}`, (Date.now() + frequencyMinutes * 60 * 1000).toString());
         showToast('✅ Reminder added');
       }
 
@@ -895,6 +916,8 @@
       r.enabled = !r.enabled;
 
       if (r.enabled) {
+        // Reset timer to fresh interval on resume
+        localStorage.setItem(`nextFire_${id}`, (Date.now() + r.frequencyMinutes * 60 * 1000).toString());
         startTimer(r);
         showToast(`▶️ ${r.task} resumed`);
       } else {
@@ -902,6 +925,7 @@
           clearInterval(timers[id].interval);
           delete timers[id];
         }
+        localStorage.removeItem(`nextFire_${id}`);
         showToast(`⏸ ${r.task} paused`);
       }
 
@@ -916,7 +940,7 @@
         clearInterval(timers[id].interval);
         delete timers[id];
       }
-      localStorage.removeItem(`lastFired_${id}`);
+      localStorage.removeItem(`nextFire_${id}`);
       reminders = reminders.filter(r => r.id !== id);
       persist();
       showToast('🗑 Reminder deleted');
@@ -944,16 +968,40 @@
       setTimeout(() => t.classList.remove('show'), 3000);
     }
 
-    // --- Visibility Change: re-check timers when user returns ---
+    // --- Visibility Change: catch up on missed notifications ---
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
+        // Check for any missed notifications
+        reminders.forEach(r => {
+          if (!r.enabled) return;
+          const nextFire = parseInt(localStorage.getItem(`nextFire_${r.id}`) || '0');
+          if (nextFire && Date.now() >= nextFire) {
+            fireNotification(r);
+            const newNext = Date.now() + (r.frequencyMinutes * 60 * 1000);
+            localStorage.setItem(`nextFire_${r.id}`, newNext.toString());
+          }
+        });
         startAllTimers();
         renderReminders();
       }
     });
 
+    // --- Wake Lock: keep screen/timers alive when possible ---
+    async function requestWakeLock() {
+      try {
+        if ('wakeLock' in navigator) {
+          await navigator.wakeLock.request('screen');
+        }
+      } catch (e) {}
+    }
+    
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) requestWakeLock();
+    });
+
     // --- Start ---
     init();
+    requestWakeLock();
   </script>
 </body>
 </html>
